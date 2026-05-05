@@ -7,7 +7,7 @@ const db = require('../db');
 const CONFIG_PATH = path.join(__dirname, '..', 'georgian-servers.json');
 const BANNER = 'https://media.discordapp.net/attachments/927693311039402025/1490002133687468114/image.png';
 
-let cache = { data: null, timestamp: 0 };
+let cache = { data: null, timestamp: 0, signature: null, lastDataChangeTs: 0 };
 const CACHE_TTL = 30_000;
 
 function loadManualList() {
@@ -23,7 +23,14 @@ function stripColors(str) {
 }
 
 function clearCache() {
-  cache = { data: null, timestamp: 0 };
+  cache = { data: null, timestamp: 0, signature: null, lastDataChangeTs: 0 };
+}
+
+function buildSignature(servers) {
+  return [...servers]
+    .map(s => `${s.endpoint}|${s.clients}|${s.maxclients}|${s.hostname}`)
+    .sort()
+    .join('\n');
 }
 
 async function fetchSingleServer(endpoint) {
@@ -70,34 +77,48 @@ function formatServer(data, endpoint) {
 
 async function buildEmbed() {
   let servers;
+  let updatedTs;
 
   if (cache.data && Date.now() - cache.timestamp < CACHE_TTL) {
     servers = cache.data;
+    updatedTs = cache.lastDataChangeTs || Math.floor(cache.timestamp / 1000);
   } else {
     const manualList = loadManualList();
-    const seen = new Set();
-    const results = [];
+    const byEndpoint = new Map();
 
     for (const endpoint of manualList) {
       const raw = await fetchSingleServer(endpoint);
       if (raw?.Data) {
-        seen.add(endpoint);
-        results.push(formatServer(raw.Data, endpoint));
+        byEndpoint.set(endpoint, formatServer(raw.Data, endpoint));
       } else {
         console.warn(`[/redm] Could not fetch manual server: ${endpoint}`);
+        // Keep configured servers visible even when the API lookup fails.
+        byEndpoint.set(endpoint, {
+          endpoint,
+          hostname: endpoint,
+          clients: 0,
+          maxclients: '?'
+        });
       }
     }
 
     const autoDetected = await fetchAutoDetected();
     for (const s of autoDetected) {
       const ep = s.EndPoint;
-      if (!ep || seen.has(ep)) continue;
-      seen.add(ep);
-      results.push(formatServer(s.Data, ep));
+      if (!ep) continue;
+      byEndpoint.set(ep, formatServer(s.Data, ep));
     }
 
-    servers = results.sort((a, b) => b.clients - a.clients);
-    cache = { data: servers, timestamp: Date.now() };
+    servers = [...byEndpoint.values()].sort((a, b) => b.clients - a.clients);
+
+    const nowMs = Date.now();
+    const nowTs = Math.floor(nowMs / 1000);
+    const signature = buildSignature(servers);
+    updatedTs = signature === cache.signature
+      ? (cache.lastDataChangeTs || nowTs)
+      : nowTs;
+
+    cache = { data: servers, timestamp: nowMs, signature, lastDataChangeTs: updatedTs };
   }
 
   const totalPlayers = servers.reduce((sum, s) => sum + s.clients, 0);
@@ -107,7 +128,7 @@ async function buildEmbed() {
     .setTitle('🇬🇪 ქართული RedM სერვერები')
     .setColor(0x8B0000)
     .setImage(BANNER)
-    .setTimestamp();
+    .setTimestamp(new Date((updatedTs || Math.floor(Date.now() / 1000)) * 1000));
 
   if (servers.length === 0) {
     embed.setDescription('ქართული სერვერები ვერ მოიძებნა.');
@@ -132,7 +153,7 @@ async function buildEmbed() {
     return `${rank} ${dot} **${display}** — ${s.clients}/${s.maxclients}${peakStr}`;
   });
 
-  const ts = Math.floor(Date.now() / 1000);
+  const ts = updatedTs || Math.floor(Date.now() / 1000);
   embed.setDescription(`👥 **${totalPlayers} მოთამაშე ონლაინ** ${online} სერვერზე\n\n${lines.join('\n')}\n\n-# განახლდა <t:${ts}:R> • დღე იწყება 06:00-ზე`);
 
   const sparkline = generateSparkline(getTotalHistory('redm'));
