@@ -79,7 +79,8 @@ async function buildEmbed() {
     if (peak > (serverPeaks.get(id) || 0)) serverPeaks.set(id, peak);
   }
 
-  const lines = servers.slice(0, 25).map((s, i) => {
+  const visibleServers = servers.filter(s => (s.players ?? 0) > 0);
+  const lines = visibleServers.slice(0, 25).map((s, i) => {
     const rank = `\`${String(i + 1).padStart(2, ' ')}\``;
     const dot = (s.players ?? 0) === 0 ? '⚫' : '🟢';
     const name = cleanName(s.name || s.addr);

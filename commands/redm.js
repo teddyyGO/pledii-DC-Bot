@@ -143,7 +143,8 @@ async function buildEmbed() {
     if (peak > (serverPeaks.get(id) || 0)) serverPeaks.set(id, peak);
   }
 
-  const lines = servers.slice(0, 25).map((s, i) => {
+  const visibleServers = servers.filter(s => s.clients > 0);
+  const lines = visibleServers.slice(0, 25).map((s, i) => {
     const rank = `\`${String(i + 1).padStart(2, ' ')}\``;
     const dot = s.clients === 0 ? '⚫' : '🟢';
     const name = stripLeadingEmoji(s.hostname || s.endpoint);
