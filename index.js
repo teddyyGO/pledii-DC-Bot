@@ -25,6 +25,8 @@ async function updatePinnedMessages(client) {
     { key: 'total',  buildEmbed: () => require('./commands/total').buildEmbed()  }
   ];
 
+  let configUpdated = false;
+
   for (const { key, buildEmbed } of games) {
     // Record combined total snapshot before building the total embed
     if (key === 'total') stats.recordCombinedSnapshot();
@@ -40,6 +42,21 @@ async function updatePinnedMessages(client) {
       console.log(`[pingeorgia] Updated ${key} pinned message`);
     } catch (err) {
       console.error(`[pingeorgia] Failed to update ${key}:`, err.message);
+      // Clear invalid message ID so it stops trying to update it
+      if (err.code === 10008 || err.message.includes('Unknown Message')) {
+        console.log(`[pingeorgia] Clearing invalid message ID for ${key}`);
+        delete pinned[key];
+        configUpdated = true;
+      }
+    }
+  }
+
+  // Save config if we cleared any invalid message IDs
+  if (configUpdated) {
+    try {
+      fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+    } catch (err) {
+      console.error('[pingeorgia] Failed to save config:', err);
     }
   }
 }

@@ -86,20 +86,36 @@ async function buildEmbed() {
     const manualList = loadManualList();
     const byEndpoint = new Map();
 
-    for (const endpoint of manualList) {
-      const raw = await fetchSingleServer(endpoint);
-      if (raw?.Data) {
-        byEndpoint.set(endpoint, formatServer(raw.Data, endpoint));
-      } else {
-        console.warn(`[/redm] Could not fetch manual server: ${endpoint}`);
-        // Keep configured servers visible even when the API lookup fails.
-        byEndpoint.set(endpoint, {
+    // Parallelize fetching all manual servers
+    const fetchPromises = manualList.map(async (endpoint) => {
+      try {
+        const raw = await fetchSingleServer(endpoint);
+        if (raw?.Data) {
+          return [endpoint, formatServer(raw.Data, endpoint)];
+        } else {
+          console.warn(`[/redm] Could not fetch manual server: ${endpoint}`);
+          // Keep configured servers visible even when the API lookup fails.
+          return [endpoint, {
+            endpoint,
+            hostname: endpoint,
+            clients: 0,
+            maxclients: '?'
+          }];
+        }
+      } catch (err) {
+        console.warn(`[/redm] Error fetching ${endpoint}:`, err.message);
+        return [endpoint, {
           endpoint,
           hostname: endpoint,
           clients: 0,
           maxclients: '?'
-        });
+        }];
       }
+    });
+
+    const results = await Promise.all(fetchPromises);
+    for (const [endpoint, serverData] of results) {
+      byEndpoint.set(endpoint, serverData);
     }
 
     const autoDetected = await fetchAutoDetected();
@@ -143,8 +159,8 @@ async function buildEmbed() {
     if (peak > (serverPeaks.get(id) || 0)) serverPeaks.set(id, peak);
   }
 
-  const visibleServers = servers.filter(s => s.clients > 0);
-  const lines = visibleServers.slice(0, 25).map((s, i) => {
+  const visibleServers = servers.slice(0, 25);
+  const lines = visibleServers.map((s, i) => {
     const rank = `\`${String(i + 1).padStart(2, ' ')}\``;
     const dot = s.clients === 0 ? '⚫' : '🟢';
     const name = stripLeadingEmoji(s.hostname || s.endpoint);
