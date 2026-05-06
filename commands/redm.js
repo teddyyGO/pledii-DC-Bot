@@ -10,6 +10,17 @@ const BANNER = 'https://media.discordapp.net/attachments/927693311039402025/1490
 let cache = { data: null, timestamp: 0, signature: null, lastDataChangeTs: 0 };
 const CACHE_TTL = 30_000;
 
+// Per-server backoff state: tracks consecutive API misses so dead servers aren't
+// fetched (or shown) every cycle. Resets automatically when a server comes back.
+const serverState = new Map(); // endpoint -> { misses: number, nextCheckAt: number }
+
+function getBackoffMs(misses) {
+  // First 2 misses: no backoff (transient outage). After that: 5 → 10 → 20 → 60 min.
+  if (misses < 3) return 0;
+  const minutes = Math.pow(2, misses - 3) * 5; // 5, 10, 20, 40, 80…
+  return Math.min(minutes, 60) * 60_000;
+}
+
 function loadManualList() {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')).redm ?? [];
@@ -24,6 +35,7 @@ function stripColors(str) {
 
 function clearCache() {
   cache = { data: null, timestamp: 0, signature: null, lastDataChangeTs: 0 };
+  serverState.clear(); // also reset all backoffs so every server gets a fresh chance
 }
 
 function buildSignature(servers) {
@@ -36,7 +48,8 @@ function buildSignature(servers) {
 async function fetchSingleServer(endpoint) {
   try {
     const res = await fetch(
-      `https://servers-frontend.fivem.net/api/servers/single/${encodeURIComponent(endpoint)}`
+      `https://servers-frontend.fivem.net/api/servers/single/${encodeURIComponent(endpoint)}`,
+      { signal: AbortSignal.timeout(5_000) }
     );
     if (!res.ok) return null;
     return await res.json();
@@ -86,36 +99,37 @@ async function buildEmbed() {
     const manualList = loadManualList();
     const byEndpoint = new Map();
 
-    // Parallelize fetching all manual servers
+    // Parallelize fetching all manual servers, skipping those in backoff
+    const now = Date.now();
     const fetchPromises = manualList.map(async (endpoint) => {
-      try {
-        const raw = await fetchSingleServer(endpoint);
-        if (raw?.Data) {
-          return [endpoint, formatServer(raw.Data, endpoint)];
-        } else {
-          console.warn(`[/redm] Could not fetch manual server: ${endpoint}`);
-          // Keep configured servers visible even when the API lookup fails.
-          return [endpoint, {
-            endpoint,
-            hostname: endpoint,
-            clients: 0,
-            maxclients: '?'
-          }];
+      const state = serverState.get(endpoint) || { misses: 0, nextCheckAt: 0 };
+
+      // Server is in backoff — don't fetch or display it this cycle
+      if (state.nextCheckAt > now) return null;
+
+      const raw = await fetchSingleServer(endpoint);
+      if (raw?.Data) {
+        // Server is back — reset backoff
+        serverState.set(endpoint, { misses: 0, nextCheckAt: 0 });
+        return [endpoint, formatServer(raw.Data, endpoint)];
+      } else {
+        // API miss — increment failure count and schedule next probe
+        const misses = state.misses + 1;
+        const backoff = getBackoffMs(misses);
+        serverState.set(endpoint, { misses, nextCheckAt: backoff > 0 ? now + backoff : 0 });
+        if (backoff > 0) {
+          const mins = Math.round(backoff / 60_000);
+          console.warn(`[/redm] ${endpoint} offline (${misses} misses) — skipping for ${mins}m`);
+          return null; // hide from list while in backoff
         }
-      } catch (err) {
-        console.warn(`[/redm] Error fetching ${endpoint}:`, err.message);
-        return [endpoint, {
-          endpoint,
-          hostname: endpoint,
-          clients: 0,
-          maxclients: '?'
-        }];
+        // Within the free retries: show as offline so it's not invisible
+        return [endpoint, { endpoint, hostname: endpoint, clients: 0, maxclients: '?' }];
       }
     });
 
     const results = await Promise.all(fetchPromises);
-    for (const [endpoint, serverData] of results) {
-      byEndpoint.set(endpoint, serverData);
+    for (const result of results) {
+      if (result) byEndpoint.set(result[0], result[1]);
     }
 
     const autoDetected = await fetchAutoDetected();
